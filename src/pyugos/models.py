@@ -1,6 +1,7 @@
 """Small data objects returned by the client."""
 
 from dataclasses import dataclass, field
+from enum import IntEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Union
 
@@ -9,6 +10,19 @@ if TYPE_CHECKING:
 
 
 PathLike = Union[str, "Path"]
+
+
+class ThumbnailSize(IntEnum):
+    """UGOS thumbnail rendition selected by the ``size_type`` query value.
+
+    Pixel dimensions are approximate and depend on the source image and UGOS
+    firmware.  Values observed on DH2300 are roughly 592px for MEDIUM, 128px
+    for SMALL, and 1600px or larger for LARGE.
+    """
+
+    MEDIUM = 1
+    SMALL = 2
+    LARGE = 3
 
 
 @dataclass(frozen=True)
@@ -45,14 +59,16 @@ class UgreenFile:
     raw: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
     _client: "UgreenNasClient" = field(repr=False, compare=False, default=None)  # type: ignore[assignment]
 
-    def get_thumbnail(self, width: int = 256, height: int = 256) -> UgreenBinary:
+    def get_thumbnail(self, size: ThumbnailSize = ThumbnailSize.SMALL) -> UgreenBinary:
+        """Get one of the three server-defined thumbnail renditions."""
+
         if self.is_directory:
             raise ValueError("Directories do not have thumbnails")
-        if width <= 0 or height <= 0:
-            raise ValueError("Thumbnail width and height must be positive")
+        if not isinstance(size, ThumbnailSize):
+            raise TypeError("size must be a ThumbnailSize value")
         if self._client is None:
             raise RuntimeError("This file is not attached to a client")
-        return self._client._get_thumbnail(self, width=width, height=height)
+        return self._client._get_thumbnail(self, size=size)
 
     def download(self, destination: Optional[PathLike] = None) -> Union[bytes, Path]:
         """Download the original, returning bytes or saving it below a directory."""

@@ -21,7 +21,7 @@ from ._crypto import (
     rsa_encrypt_base64,
 )
 from .errors import ApiError, AuthenticationError, SearchTimeoutError, TransportError
-from .models import UgreenBinary, UgreenFile, file_from_record
+from .models import ThumbnailSize, UgreenBinary, UgreenFile, file_from_record
 
 
 SEARCH_TYPES = {
@@ -266,13 +266,16 @@ class UgreenNasClient:
         except (TypeError, ValueError):
             return None
 
-    def _get_thumbnail(self, file: UgreenFile, *, width: int, height: int) -> UgreenBinary:
+    def _get_thumbnail(self, file: UgreenFile, *, size: ThumbnailSize) -> UgreenBinary:
         params: Dict[str, Any] = {
             "path": file.path,
             "type": 1,
-            "size_type": 3,
-            "width": width,
-            "height": height,
+            "size_type": int(size),
+            # The official UI sends its display-box size here, but the server
+            # selects the actual rendition using size_type.  Keep the 112px
+            # hint observed in File Manager HAR captures.
+            "width": 112,
+            "height": 112,
             "mtime": file.mtime,
             "ctime": file.ctime,
             "file_size": file.size,

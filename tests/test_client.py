@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from pyugos import UgreenNasClient
+from pyugos import ThumbnailSize, UgreenNasClient
 from pyugos._crypto import decrypt_bytes, stringify_query
 
 
@@ -130,10 +130,13 @@ def test_login_encrypts_password_and_search_maps_files():
     assert plaintext["search_type"] == ["image"]
     assert plaintext["search_only"] is False
 
-    thumbnail = files[0].get_thumbnail(64, 64)
+    thumbnail = files[0].get_thumbnail(ThumbnailSize.SMALL)
     assert bytes(thumbnail) == b"thumbnail"
     thumbnail_params = session.calls[5][2]["params"]
     assert thumbnail_params["ugk"] == "static-token"
+    assert thumbnail_params["size_type"] == 2
+    assert thumbnail_params["width"] == 112
+    assert thumbnail_params["height"] == 112
     assert "encrypt_query" not in thumbnail_params
 
     assert files[0].download() == b"original"

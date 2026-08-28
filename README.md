@@ -16,7 +16,7 @@ python -m pip install -e .
 ```python
 from pathlib import Path
 
-from pyugos import UgreenNasClient
+from pyugos import ThumbnailSize, UgreenNasClient
 
 nas = UgreenNasClient(host="192.168.1.100", port=9999)
 nas.login(username="hoge", password="fuga")
@@ -30,14 +30,14 @@ files = nas.search(
 for file in files:
     print(file.name, file.path, file.size, file.mtime)
 
-    thumbnail = file.get_thumbnail(width=256, height=256)
+    thumbnail = file.get_thumbnail(size=ThumbnailSize.SMALL)
     thumbnail.save(Path("thumbnails") / (file.name + ".webp"))
 
     # destination はローカル側の保存先ディレクトリです。
     file.download(destination="originals")
 ```
 
-`get_thumbnail()` は `UgreenBinary` を返します。`bytes(thumbnail)` で内容を取得でき、`thumbnail.content_type` でレスポンスの Content-Type を確認できます。`download()` は保存先を省略すると `bytes`、指定すると保存した `Path` を返します。
+`get_thumbnail()` の `size` には `ThumbnailSize.SMALL`（`size_type=2`）、`MEDIUM`（`1`）、`LARGE`（`3`）を指定できます。実際のピクセル寸法は画像とUGOSのバージョンに依存します。戻り値は `UgreenBinary` で、`bytes(thumbnail)` で内容を取得でき、`thumbnail.content_type` でレスポンスの Content-Type を確認できます。`download()` は保存先を省略すると `bytes`、指定すると保存した `Path` を返します。
 
 ## 対応範囲
 

@@ -8,13 +8,14 @@ from .errors import (
     SearchTimeoutError,
     TransportError,
 )
-from .models import UgreenBinary, UgreenFile
+from .models import ThumbnailSize, UgreenBinary, UgreenFile
 
 __all__ = [
     "ApiError",
     "AuthenticationError",
     "PyUgosError",
     "SearchTimeoutError",
+    "ThumbnailSize",
     "TransportError",
     "UgreenBinary",
     "UgreenFile",

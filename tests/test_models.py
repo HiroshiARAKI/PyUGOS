@@ -2,11 +2,17 @@ from pathlib import Path
 
 import pytest
 
-from pyugos.models import UgreenBinary, file_from_record
+from pyugos.models import ThumbnailSize, UgreenBinary, file_from_record
 
 
 class StubClient:
     pass
+
+
+def test_thumbnail_size_values_match_ugos_size_type():
+    assert ThumbnailSize.MEDIUM == 1
+    assert ThumbnailSize.SMALL == 2
+    assert ThumbnailSize.LARGE == 3
 
 
 def test_binary_save(tmp_path: Path):
