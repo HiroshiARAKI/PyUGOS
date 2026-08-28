@@ -1,5 +1,8 @@
 # PyUGOS
-**NOTE: This is the unofficial tool for UGREEN NAS based on the behaviors as of August 2026**
+
+[English](README.en.md) | 日本語
+
+**NOTE: This is an unofficial tool for UGREEN NAS, based on behavior observed as of August 2026.**
 
 PyUGOS は、UGOS Pro NAS の private API に読み取り専用でアクセスするための、小さな Python クライアントです。Python 3.9 以降をサポートします。
 
