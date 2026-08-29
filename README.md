@@ -58,7 +58,7 @@ with file.open_download(range_header="bytes=0-1048575") as stream:
         process(chunk)
 ```
 
-Rangeは `bytes=0-1023`、`bytes=1024-`、`bytes=-1024` のような単一範囲だけを受け付けます。複数Rangeはリクエスト前に拒否されます。`download(destination=...)` もローカルファイルへストリーミング保存します。保存先を省略して `bytes` を受け取る場合のみ、従来どおり原本全体をメモリへ保持します。
+Rangeは `bytes=0-1023`、`bytes=1024-`、`bytes=-1024` のような単一範囲だけを受け付けます。複数Rangeはリクエスト前に拒否されます。`download(destination=...)` も一時ファイルへストリーミングし、完了後に置き換えるため、転送失敗時に既存ファイルを破損しません。保存先を省略して `bytes` を受け取る場合のみ、従来どおり原本全体をメモリへ保持します。
 
 ## 対応範囲
 

@@ -212,3 +212,27 @@ def test_download_to_directory_streams_to_disk(tmp_path):
     assert saved == tmp_path / "movie.mp4"
     assert saved.read_bytes() == b"abcdef"
     assert response.closed
+    assert list(tmp_path.glob(".pyugos-*.part")) == []
+
+
+def test_interrupted_download_preserves_existing_file_and_removes_temporary_file(
+    tmp_path,
+):
+    destination = tmp_path / "movie.mp4"
+    destination.write_bytes(b"existing-content")
+    response = FakeStreamingResponse(
+        200,
+        headers={"Content-Type": "video/mp4", "Content-Length": "12"},
+        chunks=[
+            b"partial",
+            ChunkedEncodingError("connection lost: ?token={}".format(TOKEN)),
+        ],
+    )
+    file, _ = make_file(response)
+
+    with pytest.raises(TransportError, match="interrupted"):
+        file.download(destination=tmp_path)
+
+    assert destination.read_bytes() == b"existing-content"
+    assert list(tmp_path.glob(".pyugos-*.part")) == []
+    assert response.closed

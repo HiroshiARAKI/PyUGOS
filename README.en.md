@@ -58,7 +58,7 @@ with file.open_download(range_header="bytes=0-1048575") as stream:
         process(chunk)
 ```
 
-Only a single range such as `bytes=0-1023`, `bytes=1024-`, or `bytes=-1024` is accepted. Multiple ranges are rejected before a request is sent. `download(destination=...)` also streams directly to the local file. Calling `download()` without a destination still buffers the complete original in memory because it returns `bytes`.
+Only a single range such as `bytes=0-1023`, `bytes=1024-`, or `bytes=-1024` is accepted. Multiple ranges are rejected before a request is sent. `download(destination=...)` streams to a temporary file and replaces the destination only after completion, preserving an existing file if the transfer fails. Calling `download()` without a destination still buffers the complete original in memory because it returns `bytes`.
 
 ## Supported features
 

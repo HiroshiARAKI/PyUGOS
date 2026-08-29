@@ -1,5 +1,7 @@
 """Small data objects returned by the client."""
 
+import os
+import tempfile
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
@@ -94,9 +96,28 @@ class UgreenFile:
         directory = Path(destination)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / self.name
-        with self.open_download() as stream, path.open("wb") as output:
-            for chunk in stream.iter_bytes():
-                output.write(chunk)
+        temporary_path: Optional[Path] = None
+        try:
+            with self.open_download() as stream:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    dir=str(directory),
+                    prefix=".pyugos-",
+                    suffix=".part",
+                    delete=False,
+                ) as output:
+                    temporary_path = Path(output.name)
+                    for chunk in stream.iter_bytes():
+                        output.write(chunk)
+            assert temporary_path is not None
+            os.replace(temporary_path, path)
+        except BaseException:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink()
+                except OSError:
+                    pass
+            raise
         return path
 
 
