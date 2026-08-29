@@ -32,3 +32,11 @@ class AuthenticationError(ApiError):
 
 class SearchTimeoutError(PyUgosError):
     """A server-side search task did not finish before its deadline."""
+
+
+class VideoPreparationTimeoutError(PyUgosError):
+    """UGOS did not prepare a browser playback before its deadline."""
+
+
+class VideoQualityUnavailableError(PyUgosError):
+    """UGOS cannot provide the requested video rendition."""

@@ -1,13 +1,14 @@
 """Read-only UGOS Pro NAS client."""
 
 import hashlib
+import itertools
 import json
 import math
 import re
 import time
 import uuid
-from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence
-from urllib.parse import urlsplit
+from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from urllib.parse import parse_qs, urlsplit
 
 import requests
 from requests import Response, Session
@@ -21,9 +22,23 @@ from ._crypto import (
     load_rsa_public_key,
     rsa_encrypt_base64,
 )
-from .errors import ApiError, AuthenticationError, SearchTimeoutError, TransportError
+from .errors import (
+    ApiError,
+    AuthenticationError,
+    SearchTimeoutError,
+    TransportError,
+    VideoPreparationTimeoutError,
+    VideoQualityUnavailableError,
+)
 from .models import ThumbnailSize, UgreenBinary, UgreenFile, file_from_record
 from .streams import UgreenDownloadStream
+from .video import (
+    UgreenHlsPlayback,
+    UgreenPlaybackHeartbeat,
+    VideoQuality,
+    VideoVariant,
+    websocket_url,
+)
 
 
 SEARCH_TYPES = {
@@ -39,6 +54,14 @@ SEARCH_TYPES = {
 }
 
 SINGLE_RANGE_PATTERN = re.compile(r"bytes=(?:(\d+)-(\d*)|-(\d+))\Z")
+VIDEO_RESOLUTION_PATTERN = re.compile(r"(?P<width>\d{3,5})\s*[xX×*]\s*(?P<height>\d{3,5})")
+VIDEO_TARGET_DIMENSIONS = {
+    VideoQuality.P1080: (1920, 1080),
+    VideoQuality.P720: (1280, 720),
+}
+VIDEO_SOURCE_TYPE_FILE_MANAGER = 1
+MAX_HLS_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_VIDEO_ERROR_BYTES = 1024 * 1024
 
 
 class UgreenNasClient:
@@ -336,6 +359,513 @@ class UgreenNasClient:
 
         return UgreenDownloadStream(response)
 
+    def _open_video_playback(
+        self,
+        file: UgreenFile,
+        *,
+        quality: VideoQuality,
+        preparation_timeout: float,
+    ) -> UgreenHlsPlayback:
+        """Prepare one quality-specific UGOS HLS media playlist."""
+
+        self._require_login()
+        if quality not in VIDEO_TARGET_DIMENSIONS:
+            raise ValueError("open_video_playback() requires a transcoded quality")
+        self._validate_preparation_timeout(preparation_timeout)
+
+        deadline = time.monotonic() + preparation_timeout
+        task_id = self._new_video_task_id()
+        src_type = VIDEO_SOURCE_TYPE_FILE_MANAGER
+        heartbeat: Optional[UgreenPlaybackHeartbeat] = None
+        try:
+            heartbeat = self._start_video_heartbeat(
+                task_id,
+                timeout=self._remaining_preparation_time(deadline),
+            )
+            info = self._get_video_info(
+                file,
+                task_id=task_id,
+                src_type=src_type,
+                timeout=self._remaining_preparation_time(deadline),
+            )
+            record = self._record_for_video_quality(info, quality)
+            if record is None:
+                raise VideoQualityUnavailableError(
+                    "UGOS cannot provide the requested {} rendition".format(quality.value)
+                )
+
+            original_dimensions = self._video_dimensions(info.get("resolution"))
+            selected_dimensions = self._video_dimensions(record)
+            is_transcoded = not (
+                original_dimensions is not None and selected_dimensions == original_dimensions
+            )
+            m3u8_file = self._video_manifest_name(info, record)
+            audio_index = self._default_audio_index(info)
+            params: Dict[str, Any] = {
+                "m3u8_file": m3u8_file,
+                "regen": 1,
+                "subtitle_index": -1,
+                "audio_index": audio_index,
+                # Force the broadly compatible rendition observed on DH2300.
+                "prefer_h265": "false",
+            }
+            params.update(self._video_session_params(task_id, src_type=src_type))
+            self._get_video_play(
+                "/ugreen/v2/stream/transcode/web/play",
+                params,
+                timeout=self._remaining_preparation_time(deadline),
+            )
+            manifest = self._get_video_manifest(
+                m3u8_file,
+                task_id=task_id,
+                src_type=src_type,
+                timeout=self._remaining_preparation_time(deadline),
+            )
+            self._remaining_preparation_time(deadline)
+            return UgreenHlsPlayback(
+                self,
+                task_id=task_id,
+                src_type=src_type,
+                manifest=manifest,
+                requested_quality=quality,
+                actual_quality=quality,
+                is_transcoded=is_transcoded,
+                heartbeat=heartbeat,
+            )
+        except BaseException as exc:
+            self._close_video_session(task_id, src_type=src_type)
+            if heartbeat is not None:
+                heartbeat.close()
+            if isinstance(exc, TransportError) and time.monotonic() >= deadline:
+                raise VideoPreparationTimeoutError("UGOS video preparation timed out") from None
+            raise
+
+    def _get_video_qualities(
+        self,
+        file: UgreenFile,
+        *,
+        preparation_timeout: float,
+    ) -> List[VideoVariant]:
+        """Return supported PyUGOS renditions from UGOS' transcode info API."""
+
+        self._require_login()
+        self._validate_preparation_timeout(preparation_timeout)
+        deadline = time.monotonic() + preparation_timeout
+        task_id = self._new_video_task_id()
+        src_type = VIDEO_SOURCE_TYPE_FILE_MANAGER
+        heartbeat: Optional[UgreenPlaybackHeartbeat] = None
+        try:
+            heartbeat = self._start_video_heartbeat(
+                task_id,
+                timeout=self._remaining_preparation_time(deadline),
+            )
+            info = self._get_video_info(
+                file,
+                task_id=task_id,
+                src_type=src_type,
+                timeout=self._remaining_preparation_time(deadline),
+            )
+            original_dimensions = self._video_dimensions(info.get("resolution"))
+            variants: List[VideoVariant] = []
+            for quality in (VideoQuality.P1080, VideoQuality.P720):
+                record = self._record_for_video_quality(info, quality)
+                if record is None:
+                    continue
+                dimensions = self._video_dimensions(record)
+                width, height = dimensions or (None, None)
+                variants.append(
+                    VideoVariant(
+                        quality=quality,
+                        width=width,
+                        height=height,
+                        transcoded=not (
+                            original_dimensions is not None and dimensions == original_dimensions
+                        ),
+                    )
+                )
+            original_width, original_height = original_dimensions or (None, None)
+            variants.append(
+                VideoVariant(
+                    quality=VideoQuality.ORIGINAL,
+                    width=original_width,
+                    height=original_height,
+                    transcoded=False,
+                )
+            )
+            return variants
+        except TransportError:
+            if time.monotonic() >= deadline:
+                raise VideoPreparationTimeoutError("UGOS video preparation timed out") from None
+            raise
+        finally:
+            self._close_video_session(task_id, src_type=src_type)
+            if heartbeat is not None:
+                heartbeat.close()
+
+    @staticmethod
+    def _validate_preparation_timeout(value: float) -> None:
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise ValueError("preparation_timeout must be a positive finite number")
+
+    @staticmethod
+    def _remaining_preparation_time(deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise VideoPreparationTimeoutError("UGOS video preparation timed out")
+        return remaining
+
+    @staticmethod
+    def _new_video_task_id() -> str:
+        value = "PC&{}&{}".format(uuid.uuid4(), int(time.time() * 1000))
+        return hashlib.md5(value.encode("ascii")).hexdigest()
+
+    @staticmethod
+    def _video_session_params(task_id: str, *, src_type: int) -> Dict[str, Any]:
+        return {
+            "task_id": task_id,
+            "timestamp": str(int(time.time() * 1000)),
+            "src_type": src_type,
+        }
+
+    def _start_video_heartbeat(
+        self,
+        task_id: str,
+        *,
+        timeout: float,
+    ) -> UgreenPlaybackHeartbeat:
+        assert self._token is not None
+        token_name = "ugk" if self._is_ugk else "token"
+        # UGOS accepts static_token for thumbnails, but the transcode
+        # WebSocket authenticates with the active login session token even
+        # when the login response reports is_ugk=true.
+        token = self._token
+        assert token is not None
+        heartbeat = UgreenPlaybackHeartbeat(
+            websocket_url(self.base_url, token_name=token_name, token=token),
+            task_id=task_id,
+            timeout=timeout,
+            verify_tls=self.verify_tls,
+        )
+        heartbeat.start()
+        return heartbeat
+
+    def _get_video_info(
+        self,
+        file: UgreenFile,
+        *,
+        task_id: str,
+        src_type: int,
+        timeout: float,
+    ) -> Mapping[str, Any]:
+        body: Dict[str, Any] = {
+            "video_path": file.path,
+            "is_net_disk_direct": False,
+        }
+        body.update(self._video_session_params(task_id, src_type=src_type))
+        try:
+            data = self._post_private(
+                "/ugreen/v2/stream/transcode/web/info",
+                body,
+                request_timeout=timeout,
+            )
+        except ApiError as exc:
+            raise ApiError(
+                "UGOS video information request failed",
+                code=self._safe_video_error_code(exc.code),
+            ) from None
+        if not isinstance(data, Mapping):
+            raise ApiError("UGOS returned invalid video information")
+        return data
+
+    def _get_video_play(
+        self,
+        path: str,
+        params: Mapping[str, Any],
+        *,
+        timeout: float,
+    ) -> Any:
+        """Start playback through UGOS' direct token-authenticated GET API."""
+
+        self._require_login()
+        assert self._token is not None
+        wire_params = dict(params)
+        wire_params["token"] = self._token
+        try:
+            response = self._send(
+                "GET",
+                path,
+                params=wire_params,
+                headers=self._client_headers(),
+                timeout=timeout,
+            )
+            payload = self._response_json(response)
+            self._check_api_result(payload)
+        except ApiError as exc:
+            raise ApiError(
+                "UGOS video playback request failed",
+                code=self._safe_video_error_code(exc.code),
+            ) from None
+        return payload.get("data") if isinstance(payload, Mapping) else None
+
+    @staticmethod
+    def _safe_video_error_code(value: Any) -> Optional[Any]:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit() and len(value) <= 12:
+            return value
+        return None
+
+    @classmethod
+    def _record_for_video_quality(
+        cls,
+        info: Mapping[str, Any],
+        quality: VideoQuality,
+    ) -> Optional[Mapping[str, Any]]:
+        target = VIDEO_TARGET_DIMENSIONS[quality]
+        records = info.get("transcodeable")
+        if not isinstance(records, list):
+            return None
+        fallback: Optional[Mapping[str, Any]] = None
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            dimensions = cls._video_dimensions(record)
+            if dimensions == target:
+                return record
+            if dimensions is not None and dimensions[1] == target[1]:
+                fallback = record
+        return fallback
+
+    @classmethod
+    def _video_dimensions(cls, value: Any) -> Optional[Tuple[int, int]]:
+        if isinstance(value, Mapping):
+            width = cls._optional_int(value.get("width"))
+            height = cls._optional_int(value.get("height"))
+            if width and height:
+                return width, height
+            for key in ("resolution", "name", "label"):
+                dimensions = cls._video_dimensions(value.get(key))
+                if dimensions is not None:
+                    return dimensions
+            return None
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        match = VIDEO_RESOLUTION_PATTERN.search(text)
+        if match is not None:
+            return int(match.group("width")), int(match.group("height"))
+        aliases = {
+            "4k": (3840, 2160),
+            "2160p": (3840, 2160),
+            "1080p": (1920, 1080),
+            "720p": (1280, 720),
+        }
+        return aliases.get(text)
+
+    @classmethod
+    def _video_manifest_name(
+        cls,
+        info: Mapping[str, Any],
+        record: Mapping[str, Any],
+    ) -> str:
+        redir_link = info.get("redir_link")
+        parsed_query = parse_qs(urlsplit(str(redir_link or "")).query)
+        video_names = parsed_query.get("video_name") or []
+        video_name = str(video_names[0]) if video_names else str(info.get("video_name") or "")
+        resolution = record.get("resolution")
+        if not video_name or not resolution:
+            raise ApiError("UGOS video information did not contain a playback name")
+        return "{}_{}.m3u8".format(video_name, resolution)
+
+    @staticmethod
+    def _default_audio_index(info: Mapping[str, Any]) -> Any:
+        audios = info.get("audios")
+        if not isinstance(audios, list) or not audios:
+            return -1
+        records = [item for item in audios if isinstance(item, Mapping)]
+        selected = next(
+            (item for item in records if item.get("isDefault") or item.get("is_default")),
+            records[0] if records else None,
+        )
+        return selected.get("id", -1) if selected is not None else -1
+
+    def _get_video_manifest(
+        self,
+        m3u8_file: str,
+        *,
+        task_id: str,
+        src_type: int,
+        timeout: float,
+    ) -> str:
+        assert self._token is not None
+        params: Dict[str, Any] = {
+            "m3u8_file": m3u8_file,
+            "token": self._token,
+        }
+        params.update(self._video_session_params(task_id, src_type=src_type))
+        response = self._send_stream(
+            "GET",
+            "/ugreen/v2/stream/transcode/web/m3u8",
+            params=params,
+            headers=self._client_headers(),
+            timeout=timeout,
+        )
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        body = self._read_small_stream(
+            response,
+            limit=MAX_HLS_MANIFEST_BYTES,
+            error_message="UGOS returned an oversized HLS manifest",
+        )
+        if response.status_code != 200:
+            self._raise_video_response_error(body, content_type=content_type)
+            raise TransportError(
+                "UGOS HLS manifest request failed (HTTP {})".format(response.status_code)
+            ) from None
+        if "json" in content_type or body.lstrip().startswith((b"{", b"[")):
+            self._raise_video_response_error(body, content_type=content_type)
+        if "mpegurl" not in content_type and "m3u8" not in content_type:
+            raise TransportError("UGOS returned an unexpected HLS manifest type")
+        try:
+            return body.decode("utf-8")
+        except UnicodeDecodeError:
+            raise TransportError("UGOS returned a non-UTF-8 HLS manifest") from None
+
+    def _open_video_segment(
+        self,
+        path: str,
+        *,
+        params: Mapping[str, str],
+        on_close: Callable[[UgreenDownloadStream], None],
+    ) -> UgreenDownloadStream:
+        self._require_login()
+        response = self._send_stream(
+            "GET",
+            path,
+            params=dict(params),
+            headers=self._client_headers(),
+        )
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        if response.status_code != 200 or "json" in content_type:
+            body = self._read_small_stream(
+                response,
+                limit=MAX_VIDEO_ERROR_BYTES,
+                error_message="UGOS returned an oversized HLS segment error",
+            )
+            self._raise_video_response_error(body, content_type=content_type)
+            raise TransportError(
+                "UGOS HLS segment request failed (HTTP {})".format(response.status_code)
+            ) from None
+
+        iterator = iter(response.iter_content(chunk_size=64 * 1024))
+        try:
+            first_chunk = next((chunk for chunk in iterator if chunk), b"")
+        except RequestException:
+            response.close()
+            raise TransportError("UGOS HLS segment request was interrupted") from None
+
+        if first_chunk.lstrip().startswith((b"{", b"[")):
+            body = self._read_iterator(
+                first_chunk,
+                iterator,
+                response=response,
+                limit=MAX_VIDEO_ERROR_BYTES,
+            )
+            self._raise_video_response_error(body, content_type=content_type)
+
+        content_iterator: Iterable[bytes] = itertools.chain((first_chunk,), iterator)
+        return UgreenDownloadStream(
+            response,
+            content_iterator=content_iterator,
+            on_close=on_close,
+        )
+
+    @staticmethod
+    def _read_small_stream(
+        response: Response,
+        *,
+        limit: int,
+        error_message: str,
+    ) -> bytes:
+        content_length = UgreenNasClient._optional_int(response.headers.get("Content-Length"))
+        if content_length is not None and content_length > limit:
+            response.close()
+            raise TransportError(error_message)
+        chunks: List[bytes] = []
+        size = 0
+        try:
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                size += len(chunk)
+                if size > limit:
+                    raise TransportError(error_message)
+                chunks.append(chunk)
+        except RequestException:
+            raise TransportError("UGOS video response was interrupted") from None
+        finally:
+            response.close()
+        return b"".join(chunks)
+
+    @staticmethod
+    def _read_iterator(
+        first_chunk: bytes,
+        iterator: Iterable[bytes],
+        *,
+        response: Response,
+        limit: int,
+    ) -> bytes:
+        chunks = [first_chunk]
+        size = len(first_chunk)
+        try:
+            for chunk in iterator:
+                size += len(chunk)
+                if size > limit:
+                    raise TransportError("UGOS returned an oversized HLS segment error")
+                chunks.append(chunk)
+        except RequestException:
+            raise TransportError("UGOS HLS segment error response was interrupted") from None
+        finally:
+            response.close()
+        return b"".join(chunks)
+
+    @classmethod
+    def _raise_video_response_error(cls, body: bytes, *, content_type: str) -> None:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            if "json" in content_type or body.lstrip().startswith((b"{", b"[")):
+                raise TransportError("UGOS returned an invalid JSON video response") from None
+            return
+        try:
+            cls._check_api_result(payload)
+        except ApiError as exc:
+            raise ApiError(
+                "UGOS video playback API failed",
+                code=cls._safe_video_error_code(exc.code),
+            ) from None
+        raise ApiError("UGOS returned JSON instead of video data")
+
+    def _close_video_session(self, task_id: str, *, src_type: int) -> None:
+        """Best-effort equivalent of the Web UI's close beacon."""
+
+        if not self.is_authenticated or self._token is None:
+            return
+        body = self._video_session_params(task_id, src_type=src_type)
+        headers = self._client_headers()
+        headers["Content-Type"] = "text/plain;charset=UTF-8"
+        try:
+            response = self._send(
+                "POST",
+                "/ugreen/v2/stream/transcode/web/close",
+                params={"token": self._token},
+                data=json.dumps(body, separators=(",", ":")),
+                headers=headers,
+                timeout=min(self.timeout, 2.0),
+            )
+            response.close()
+        except (ApiError, TransportError):
+            pass
+
     @staticmethod
     def _validate_range_header(value: str) -> str:
         match = SINGLE_RANGE_PATTERN.fullmatch(value)
@@ -351,8 +881,35 @@ class UgreenNasClient:
             raise ValueError("The range end must not be smaller than its start")
         return value
 
-    def _post_private(self, path: str, body: Mapping[str, Any]) -> Any:
-        payload = self._private_request("POST", path, body=body)
+    def _post_private(
+        self,
+        path: str,
+        body: Mapping[str, Any],
+        *,
+        request_timeout: Optional[float] = None,
+    ) -> Any:
+        payload = self._private_request(
+            "POST",
+            path,
+            body=body,
+            request_timeout=request_timeout,
+        )
+        self._check_api_result(payload)
+        return payload.get("data") if isinstance(payload, Mapping) else None
+
+    def _get_private(
+        self,
+        path: str,
+        params: Mapping[str, Any],
+        *,
+        request_timeout: Optional[float] = None,
+    ) -> Any:
+        payload = self._private_request(
+            "GET",
+            path,
+            public_params=params,
+            request_timeout=request_timeout,
+        )
         self._check_api_result(payload)
         return payload.get("data") if isinstance(payload, Mapping) else None
 
@@ -380,8 +937,17 @@ class UgreenNasClient:
         *,
         body: Optional[Mapping[str, Any]] = None,
         params: Optional[Mapping[str, Any]] = None,
+        public_params: Optional[Mapping[str, Any]] = None,
+        request_timeout: Optional[float] = None,
     ) -> Any:
-        response, aes_key = self._send_private(method, path, body=body, params=params)
+        response, aes_key = self._send_private(
+            method,
+            path,
+            body=body,
+            params=params,
+            public_params=public_params,
+            request_timeout=request_timeout,
+        )
         return self._decode_private_json(response, aes_key)
 
     def _send_private(
@@ -391,6 +957,8 @@ class UgreenNasClient:
         *,
         body: Optional[Mapping[str, Any]] = None,
         params: Optional[Mapping[str, Any]] = None,
+        public_params: Optional[Mapping[str, Any]] = None,
+        request_timeout: Optional[float] = None,
     ):
         self._require_login()
         assert self._token is not None
@@ -414,12 +982,16 @@ class UgreenNasClient:
             query["token"] = self._token
 
         request_kwargs: Dict[str, Any] = {"headers": headers}
+        if request_timeout is not None:
+            request_kwargs["timeout"] = request_timeout
         if method.upper() == "POST":
             request_kwargs["json"] = encrypt_request_body(aes_key, body or {})
             if query:
                 request_kwargs["params"] = encrypt_query(aes_key, query)
         elif method.upper() == "GET":
-            request_kwargs["params"] = encrypt_query(aes_key, query)
+            wire_params: Dict[str, Any] = dict(public_params or {})
+            wire_params.update(encrypt_query(aes_key, query))
+            request_kwargs["params"] = wire_params
         else:
             raise ValueError("Only read-only GET and search-related POST requests are supported")
 

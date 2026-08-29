@@ -19,7 +19,7 @@ python -m pip install -e .
 ```python
 from pathlib import Path
 
-from pyugos import ThumbnailSize, UgreenNasClient
+from pyugos import ThumbnailSize, UgreenNasClient, VideoQuality
 
 nas = UgreenNasClient(host="192.168.1.100", port=9999)
 nas.login(username="hoge", password="fuga")
@@ -60,6 +60,52 @@ with file.open_download(range_header="bytes=0-1048575") as stream:
 
 Rangeは `bytes=0-1023`、`bytes=1024-`、`bytes=-1024` のような単一範囲だけを受け付けます。複数Rangeはリクエスト前に拒否されます。`download(destination=...)` も一時ファイルへストリーミングし、完了後に置き換えるため、転送失敗時に既存ファイルを破損しません。保存先を省略して `bytes` を受け取る場合のみ、従来どおり原本全体をメモリへ保持します。
 
+### 1080p／720p HLS再生
+
+DH2300 / UGOS Pro 1.18.2.0100のブラウザ再生用変換はMP4 Rangeではなく、画質別のHLS（MPEG-TS）です。`open_video_playback()`はUGOSの再生セッションを開始し、heartbeatを維持しながら、トークンを含まないマニフェストとopaqueなセグメントIDを公開します。
+
+```python
+from pyugos import VideoQuality
+
+qualities = file.get_video_qualities()
+
+with file.open_video_playback(
+    VideoQuality.P1080,  # VideoQuality.P720 も指定可能
+    preparation_timeout=60,
+) as playback:
+    print(playback.protocol)          # hls
+    print(playback.requested_quality)
+    print(playback.actual_quality)
+    print(playback.is_transcoded)
+
+    # Hagukumi等のプロキシ上のURLへ書き換えます。省略時は
+    # segments/<opaque-id> という相対URLになります。
+    manifest = playback.open_manifest(
+        lambda segment_id: "/video/segments/{}".format(segment_id)
+    )
+    serve(bytes(manifest), content_type=manifest.content_type)
+
+    segment_id = playback.segment_ids[0]
+    with playback.open_segment(segment_id) as segment:
+        for chunk in segment.iter_bytes():
+            serve_chunk(chunk)
+```
+
+UGOSのURL、API token、transcode task IDは公開オブジェクトの`repr()`や書き換え後のマニフェストへ含まれません。`playback.close()`は開いているセグメント、WebSocket heartbeat、UGOS再生セッションを閉じます。必ずcontext managerで使用してください。
+
+原本は同じ画質enumを使って既存Rangeストリームを開けます。
+
+```python
+with file.open_video(
+    VideoQuality.ORIGINAL,
+    range_header="bytes=0-",
+) as stream:
+    for chunk in stream.iter_bytes():
+        serve_chunk(chunk)
+```
+
+`P1080`と`P720`はHLSなので`range_header`を受け付けません。要求画質がUGOSの`transcodeable`一覧にない場合は、原本へフォールバックせず`VideoQualityUnavailableError`を送出します。
+
 ## 対応範囲
 
 - username / password ログイン（OTP なし）
@@ -67,11 +113,13 @@ Rangeは `bytes=0-1023`、`bytes=1024-`、`bytes=-1024` のような単一範囲
 - サーバー側 search task によるファイル検索
 - サムネイル取得
 - Range対応のストリーミングダウンロード
+- 1080p／720pのHLSブラウザ再生用ストリーム
+- 利用可能動画画質の取得
 - `/ugreen/v1/filemgr/downloadFile` からの単一ファイル取得
 
 NAS 上のファイル作成、更新、移動、削除を行うメソッドは実装していません。検索 task の作成には private API の仕様上 POST を使いますが、NAS のファイルシステムは変更しません。
 
-実機確認は DH2300 / UGOS Pro 1.18 系の header token mode で行っています。`downloadFile` の通常取得（200）、単一Range（206）、範囲外（416）も実機で確認済みです。url token mode は解析済みの通信仕様に基づく実装で、実機では未確認です。
+実機確認は DH2300 / UGOS Pro 1.18 系の header token mode で行っています。`downloadFile` の通常取得（200）、単一Range（206）、範囲外（416）も実機で確認済みです。1080p／720p HLSの通信仕様はDH2300 / UGOS Pro 1.18.2.0100のHARとWebプレイヤー実装に基づきます。url token mode は解析済みの通信仕様に基づく実装で、実機では未確認です。
 
 ## 開発
 
