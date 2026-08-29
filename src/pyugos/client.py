@@ -410,7 +410,7 @@ class UgreenNasClient:
                 "prefer_h265": "false",
             }
             params.update(self._video_session_params(task_id, src_type=src_type))
-            self._get_video_private(
+            self._get_video_play(
                 "/ugreen/v2/stream/transcode/web/play",
                 params,
                 timeout=self._remaining_preparation_time(deadline),
@@ -535,7 +535,10 @@ class UgreenNasClient:
     ) -> UgreenPlaybackHeartbeat:
         assert self._token is not None
         token_name = "ugk" if self._is_ugk else "token"
-        token = self._static_token if self._is_ugk else self._token
+        # UGOS accepts static_token for thumbnails, but the transcode
+        # WebSocket authenticates with the active login session token even
+        # when the login response reports is_ugk=true.
+        token = self._token
         assert token is not None
         heartbeat = UgreenPlaybackHeartbeat(
             websocket_url(self.base_url, token_name=token_name, token=token),
@@ -574,20 +577,35 @@ class UgreenNasClient:
             raise ApiError("UGOS returned invalid video information")
         return data
 
-    def _get_video_private(
+    def _get_video_play(
         self,
         path: str,
         params: Mapping[str, Any],
         *,
         timeout: float,
     ) -> Any:
+        """Start playback through UGOS' direct token-authenticated GET API."""
+
+        self._require_login()
+        assert self._token is not None
+        wire_params = dict(params)
+        wire_params["token"] = self._token
         try:
-            return self._get_private(path, params, request_timeout=timeout)
+            response = self._send(
+                "GET",
+                path,
+                params=wire_params,
+                headers=self._client_headers(),
+                timeout=timeout,
+            )
+            payload = self._response_json(response)
+            self._check_api_result(payload)
         except ApiError as exc:
             raise ApiError(
                 "UGOS video playback request failed",
                 code=self._safe_video_error_code(exc.code),
             ) from None
+        return payload.get("data") if isinstance(payload, Mapping) else None
 
     @staticmethod
     def _safe_video_error_code(value: Any) -> Optional[Any]:

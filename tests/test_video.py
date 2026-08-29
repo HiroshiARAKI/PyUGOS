@@ -111,7 +111,7 @@ def prepare_fake_video_client(client: UgreenNasClient, resolution: str):
         play_calls.append(dict(params))
         return {"bitrate_bps": 8_000_000}
 
-    client._get_video_private = fake_play  # type: ignore[method-assign]
+    client._get_video_play = fake_play  # type: ignore[method-assign]
     client._get_video_manifest = (  # type: ignore[method-assign]
         lambda *args, **kwargs: manifest_for(resolution)
     )
@@ -267,6 +267,48 @@ def test_video_api_error_drops_sensitive_message_and_payload():
     assert captured.value.payload is None
     assert heartbeat.closed
     assert len(close_calls) == 1
+
+
+def test_video_play_uses_direct_session_token_without_encrypted_query():
+    _, client = make_file()
+    client._is_ugk = True
+    client._static_token = "static-token-must-not-be-used"
+    calls = []
+
+    def send(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return SimpleNamespace(json=lambda: {"code": 200, "data": {"bitrate_bps": 1}})
+
+    client._send = send  # type: ignore[method-assign]
+    result = client._get_video_play("/play", {"m3u8_file": "video.m3u8"}, timeout=3)
+
+    assert result == {"bitrate_bps": 1}
+    assert calls[0][0:2] == ("GET", "/play")
+    assert calls[0][2]["params"] == {
+        "m3u8_file": "video.m3u8",
+        "token": TOKEN,
+    }
+    assert "X-Ugreen-Security-Code" not in calls[0][2]["headers"]
+
+
+def test_ugk_heartbeat_uses_active_session_token(monkeypatch):
+    _, client = make_file()
+    client._is_ugk = True
+    client._static_token = "static-token-must-not-be-used"
+    captured = {}
+
+    class CapturingHeartbeat(FakeHeartbeat):
+        def __init__(self, url, **kwargs):
+            captured["url"] = url
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr("pyugos.client.UgreenPlaybackHeartbeat", CapturingHeartbeat)
+    client._start_video_heartbeat("task", timeout=3)
+
+    assert "ugk={}".format(TOKEN) in captured["url"]
+    assert "static-token-must-not-be-used" not in captured["url"]
 
 
 def test_preparation_timeout_is_dedicated_error(monkeypatch):
