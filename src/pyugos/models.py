@@ -1,5 +1,7 @@
 """Small data objects returned by the client."""
 
+import os
+import tempfile
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
@@ -7,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Union
 
 if TYPE_CHECKING:
     from .client import UgreenNasClient
+    from .streams import UgreenDownloadStream
 
 
 PathLike = Union[str, "Path"]
@@ -70,19 +73,52 @@ class UgreenFile:
             raise RuntimeError("This file is not attached to a client")
         return self._client._get_thumbnail(self, size=size)
 
-    def download(self, destination: Optional[PathLike] = None) -> Union[bytes, Path]:
-        """Download the original, returning bytes or saving it below a directory."""
+    def open_download(
+        self,
+        range_header: Optional[str] = None,
+    ) -> "UgreenDownloadStream":
+        """Open a closeable streaming download, optionally for one byte range."""
 
         if self.is_directory:
             raise ValueError("Directory downloads are not supported")
         if self._client is None:
             raise RuntimeError("This file is not attached to a client")
-        data = self._client._download_file(self)
+        return self._client._open_download_stream(self, range_header=range_header)
+
+    def download(self, destination: Optional[PathLike] = None) -> Union[bytes, Path]:
+        """Download the original, streaming directly when saving to a directory."""
+
+        if self.is_directory:
+            raise ValueError("Directory downloads are not supported")
         if destination is None:
-            return data.content
+            with self.open_download() as stream:
+                return b"".join(stream.iter_bytes())
         directory = Path(destination)
         directory.mkdir(parents=True, exist_ok=True)
-        return data.save(directory / self.name)
+        path = directory / self.name
+        temporary_path: Optional[Path] = None
+        try:
+            with self.open_download() as stream:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    dir=str(directory),
+                    prefix=".pyugos-",
+                    suffix=".part",
+                    delete=False,
+                ) as output:
+                    temporary_path = Path(output.name)
+                    for chunk in stream.iter_bytes():
+                        output.write(chunk)
+            assert temporary_path is not None
+            os.replace(temporary_path, path)
+        except BaseException:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink()
+                except OSError:
+                    pass
+            raise
+        return path
 
 
 def _first(record: Mapping[str, Any], *names: str, default: Any = None) -> Any:

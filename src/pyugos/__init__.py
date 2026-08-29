@@ -9,6 +9,7 @@ from .errors import (
     TransportError,
 )
 from .models import ThumbnailSize, UgreenBinary, UgreenFile
+from .streams import UgreenDownloadStream
 
 __all__ = [
     "ApiError",
@@ -18,6 +19,7 @@ __all__ = [
     "ThumbnailSize",
     "TransportError",
     "UgreenBinary",
+    "UgreenDownloadStream",
     "UgreenFile",
     "UgreenNasClient",
 ]
