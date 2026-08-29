@@ -28,12 +28,19 @@ class FakeBinaryResponse:
         self.content = content
         self.headers = {"Content-Type": content_type}
         self.status_code = 200
+        self.closed = False
 
     def json(self):
         raise ValueError("binary response")
 
     def raise_for_status(self):
         return None
+
+    def iter_content(self, chunk_size):
+        yield self.content
+
+    def close(self):
+        self.closed = True
 
 
 class FakeSession:

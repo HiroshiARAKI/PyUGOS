@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence
@@ -22,6 +23,7 @@ from ._crypto import (
 )
 from .errors import ApiError, AuthenticationError, SearchTimeoutError, TransportError
 from .models import ThumbnailSize, UgreenBinary, UgreenFile, file_from_record
+from .streams import UgreenDownloadStream
 
 
 SEARCH_TYPES = {
@@ -35,6 +37,8 @@ SEARCH_TYPES = {
     "archive",
     "custom",
 }
+
+SINGLE_RANGE_PATTERN = re.compile(r"bytes=(?:(\d+)-(\d*)|-(\d+))\Z")
 
 
 class UgreenNasClient:
@@ -292,14 +296,60 @@ class UgreenNasClient:
         headers["Thumb-ID"] = uuid.uuid4().hex
         return self._get_direct_binary("/ugreen/v1/filemgr/thumbnail", params, headers=headers)
 
-    def _download_file(self, file: UgreenFile) -> UgreenBinary:
-        # The desktop download worker constructs this URL directly rather than
-        # passing it through the encrypted API wrapper.
-        return self._get_direct_binary(
+    def _open_download_stream(
+        self,
+        file: UgreenFile,
+        *,
+        range_header: Optional[str],
+    ) -> UgreenDownloadStream:
+        """Open UGOS' direct download endpoint without buffering its body."""
+
+        self._require_login()
+        headers = self._client_headers()
+        if range_header is not None:
+            headers["Range"] = self._validate_range_header(range_header)
+
+        response = self._send_stream(
+            "GET",
             "/ugreen/v1/filemgr/downloadFile",
-            {"paths": file.path, "token": self._token, "coding": "true"},
-            headers=self._client_headers(),
+            params={"paths": file.path, "token": self._token, "coding": "true"},
+            headers=headers,
         )
+        content_type = (response.headers.get("Content-Type") or "").lower()
+
+        if response.status_code != 416 and "json" in content_type:
+            try:
+                payload = response.json()
+            except ValueError:
+                raise TransportError("UGOS returned an invalid JSON download response") from None
+            finally:
+                response.close()
+            self._check_api_result(payload)
+            raise ApiError("UGOS returned JSON instead of a download", payload=payload)
+
+        if response.status_code not in {200, 206, 416}:
+            status_code = response.status_code
+            response.close()
+            raise TransportError(
+                "UGOS download request failed (HTTP {})".format(status_code)
+            ) from None
+
+        return UgreenDownloadStream(response)
+
+    @staticmethod
+    def _validate_range_header(value: str) -> str:
+        match = SINGLE_RANGE_PATTERN.fullmatch(value)
+        if match is None:
+            raise ValueError(
+                "range_header must be one range such as 'bytes=0-1023', "
+                "'bytes=1024-', or 'bytes=-1024'"
+            )
+        start, end, suffix = match.groups()
+        if suffix is not None and int(suffix) == 0:
+            raise ValueError("A suffix byte range must be greater than zero")
+        if start is not None and end and int(end) < int(start):
+            raise ValueError("The range end must not be smaller than its start")
+        return value
 
     def _post_private(self, path: str, body: Mapping[str, Any]) -> Any:
         payload = self._private_request("POST", path, body=body)
@@ -395,6 +445,16 @@ class UgreenNasClient:
             # requests exception chain so an unhandled traceback cannot print
             # the prepared URL and leak that credential.
             raise TransportError("UGOS request failed{}".format(detail)) from None
+
+    def _send_stream(self, method: str, path: str, **kwargs: Any) -> Response:
+        kwargs.setdefault("timeout", self.timeout)
+        kwargs.setdefault("verify", self.verify_tls)
+        kwargs["stream"] = True
+        try:
+            return self._session.request(method, self.base_url + path, **kwargs)
+        except RequestException:
+            # The prepared URL contains the raw API token.
+            raise TransportError("UGOS download request failed") from None
 
     @staticmethod
     def _response_json(response: Response) -> Any:

@@ -98,10 +98,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.destination,
         )
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        content = item.download()
-        if not isinstance(content, bytes):
-            raise TypeError("download() unexpectedly returned a local path")
-        local_path.write_bytes(content)
+        with item.open_download() as stream, local_path.open("wb") as output:
+            if stream.status_code != 200:
+                raise RuntimeError(
+                    "Unexpected download status: {}".format(stream.status_code)
+                )
+            for chunk in stream.iter_bytes():
+                output.write(chunk)
 
         thumbnail_path = destination_for(
             remote_root,
