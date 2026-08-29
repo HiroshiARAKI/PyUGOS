@@ -42,6 +42,19 @@ for file in files:
 
 The `size` argument to `get_thumbnail()` accepts `ThumbnailSize.SMALL` (`size_type=2`), `MEDIUM` (`1`), or `LARGE` (`3`). Actual pixel dimensions depend on the source image and UGOS version. The method returns a `UgreenBinary`; use `bytes(thumbnail)` to access its content and `thumbnail.content_type` to inspect the response Content-Type. `download()` returns `bytes` when no destination is given, or the saved `Path` when a destination is specified.
 
+### Media information
+
+Retrieve the same media metadata that UGOS displays for image, audio, and video files in its detail panel.
+
+```python
+info = file.get_media_info()
+print(info.width, info.height)
+print(info.duration, info.frame_rate)
+print(info.video_format, info.hdr)
+```
+
+The result is a `UgreenMediaInfo`. Fields unavailable for a file are `None`, while `info.raw` retains the original data, including firmware-specific additions. Typed fields cover resolution, duration, bit rate, channels, frame rate, video format, HDR, capture device and time, software, color space, ISO, aperture, shutter speed, and focal length. Values retain the units and formatting supplied by UGOS. Directories are not supported.
+
 ### Streaming downloads with Range
 
 Use `open_download()` to download large files such as videos without buffering the complete original in memory. Use it as a context manager so the HTTP response is always closed.
@@ -112,6 +125,7 @@ Because `P1080` and `P720` use HLS, they reject `range_header`. If UGOS does not
 - Header and URL token modes
 - File search through server-side search tasks
 - Thumbnail retrieval
+- Image, audio, and video media information
 - Range-aware streaming downloads
 - 1080p and 720p HLS browser-playback streams
 - Available video-quality discovery
@@ -119,7 +133,7 @@ Because `P1080` and `P720` use HLS, they reject `range_header`. If UGOS does not
 
 The client does not expose methods for creating, updating, moving, or deleting files on the NAS. Search-task creation uses POST as required by the private API, but it does not modify the NAS filesystem.
 
-The client has been tested against a DH2300 running UGOS Pro 1.18 in header token mode. Normal downloads (200), single-range downloads (206), and unsatisfiable ranges (416) have also been verified against the device. The 1080p/720p HLS protocol is based on a DH2300 running UGOS Pro 1.18.2.0100, its captured network traffic, and its Web player implementation. URL token mode is implemented from the observed protocol but has not been tested against a device.
+The client has been tested against a DH2300 running UGOS Pro 1.18 in header token mode. Normal downloads (200), single-range downloads (206), and unsatisfiable ranges (416) have also been verified against the device. The 1080p/720p HLS protocol is based on a DH2300 running UGOS Pro 1.18.2.0100, its captured network traffic, and its Web player implementation. Media-information retrieval is based on a HAR capture and the Web UI implementation from the same firmware version. URL token mode is implemented from the observed protocol but has not been tested against a device.
 
 ## Development
 

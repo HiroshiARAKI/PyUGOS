@@ -30,7 +30,14 @@ from .errors import (
     VideoPreparationTimeoutError,
     VideoQualityUnavailableError,
 )
-from .models import ThumbnailSize, UgreenBinary, UgreenFile, file_from_record
+from .models import (
+    ThumbnailSize,
+    UgreenBinary,
+    UgreenFile,
+    UgreenMediaInfo,
+    file_from_record,
+    media_info_from_record,
+)
 from .streams import UgreenDownloadStream
 from .video import (
     UgreenHlsPlayback,
@@ -318,6 +325,20 @@ class UgreenNasClient:
         headers = self._client_headers()
         headers["Thumb-ID"] = uuid.uuid4().hex
         return self._get_direct_binary("/ugreen/v1/filemgr/thumbnail", params, headers=headers)
+
+    def _get_media_info(self, file: UgreenFile) -> UgreenMediaInfo:
+        """Get the metadata shown by the UGOS Web File Manager detail panel."""
+
+        payload = self._private_request(
+            "GET",
+            "/ugreen/v1/filemgr/getMediaInfo",
+            params={"path": file.path},
+        )
+        self._check_api_result(payload)
+        data = payload.get("data") if isinstance(payload, Mapping) else None
+        if not isinstance(data, Mapping):
+            raise ApiError("UGOS returned invalid media information")
+        return media_info_from_record(data)
 
     def _open_download_stream(
         self,
