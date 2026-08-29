@@ -1,6 +1,6 @@
-"""Streaming response objects for large UGOS downloads."""
+"""Streaming response objects for large UGOS downloads and HLS segments."""
 
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 from requests import Response
 from requests.exceptions import RequestException
@@ -15,13 +15,21 @@ class UgreenDownloadStream:
     response when it is exhausted or interrupted by a transport error.
     """
 
-    def __init__(self, response: Response) -> None:
+    def __init__(
+        self,
+        response: Response,
+        *,
+        content_iterator: Optional[Iterable[bytes]] = None,
+        on_close: Optional[Callable[["UgreenDownloadStream"], None]] = None,
+    ) -> None:
         self.status_code = int(response.status_code)
         self.content_type = response.headers.get("Content-Type")
         self.content_length = self._optional_int(response.headers.get("Content-Length"))
         self.content_range = response.headers.get("Content-Range")
         self.accept_ranges = response.headers.get("Accept-Ranges")
         self._response = response
+        self._content_iterator = content_iterator
+        self._on_close = on_close
         self._closed = False
         self._iteration_started = False
 
@@ -48,7 +56,10 @@ class UgreenDownloadStream:
         self._iteration_started = True
 
         try:
-            for chunk in self._response.iter_content(chunk_size=chunk_size):
+            iterator = self._content_iterator
+            if iterator is None:
+                iterator = self._response.iter_content(chunk_size=chunk_size)
+            for chunk in iterator:
                 if chunk:
                     yield chunk
         except RequestException:
@@ -63,7 +74,13 @@ class UgreenDownloadStream:
 
         if not self._closed:
             self._closed = True
-            self._response.close()
+            callback = self._on_close
+            self._on_close = None
+            try:
+                self._response.close()
+            finally:
+                if callback is not None:
+                    callback(self)
 
     def __enter__(self) -> "UgreenDownloadStream":
         if self._closed:

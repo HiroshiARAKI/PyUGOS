@@ -5,7 +5,9 @@ import tempfile
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Union
+
+from .video import UgreenHlsPlayback, VideoQuality, VideoVariant
 
 if TYPE_CHECKING:
     from .client import UgreenNasClient
@@ -84,6 +86,69 @@ class UgreenFile:
         if self._client is None:
             raise RuntimeError("This file is not attached to a client")
         return self._client._open_download_stream(self, range_header=range_header)
+
+    def open_video(
+        self,
+        quality: VideoQuality,
+        range_header: Optional[str] = None,
+        *,
+        preparation_timeout: float = 60.0,
+    ) -> Union["UgreenDownloadStream", UgreenHlsPlayback]:
+        """Open the original byte stream or a transcoded HLS playback.
+
+        ``ORIGINAL`` delegates to ``open_download()`` and accepts one byte
+        range.  ``P1080`` and ``P720`` return an HLS playback and therefore do
+        not accept ``range_header``.
+        """
+
+        if not isinstance(quality, VideoQuality):
+            raise TypeError("quality must be a VideoQuality value")
+        if quality is VideoQuality.ORIGINAL:
+            return self.open_download(range_header=range_header)
+        if range_header is not None:
+            raise ValueError("range_header is only supported for ORIGINAL video")
+        return self.open_video_playback(
+            quality,
+            preparation_timeout=preparation_timeout,
+        )
+
+    def open_video_playback(
+        self,
+        quality: VideoQuality,
+        *,
+        preparation_timeout: float = 60.0,
+    ) -> UgreenHlsPlayback:
+        """Prepare UGOS' browser HLS rendition at 1080p or 720p."""
+
+        if self.is_directory:
+            raise ValueError("Directories do not have video playbacks")
+        if not isinstance(quality, VideoQuality):
+            raise TypeError("quality must be a VideoQuality value")
+        if quality is VideoQuality.ORIGINAL:
+            raise ValueError("Use open_video() or open_download() for ORIGINAL video")
+        if self._client is None:
+            raise RuntimeError("This file is not attached to a client")
+        return self._client._open_video_playback(
+            self,
+            quality=quality,
+            preparation_timeout=preparation_timeout,
+        )
+
+    def get_video_qualities(
+        self,
+        *,
+        preparation_timeout: float = 60.0,
+    ) -> List[VideoVariant]:
+        """Get the supported 1080p/720p renditions plus the original."""
+
+        if self.is_directory:
+            raise ValueError("Directories do not have video qualities")
+        if self._client is None:
+            raise RuntimeError("This file is not attached to a client")
+        return self._client._get_video_qualities(
+            self,
+            preparation_timeout=preparation_timeout,
+        )
 
     def download(self, destination: Optional[PathLike] = None) -> Union[bytes, Path]:
         """Download the original, streaming directly when saving to a directory."""

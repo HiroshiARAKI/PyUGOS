@@ -6,7 +6,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from pyugos import ThumbnailSize, UgreenNasClient
-from pyugos._crypto import decrypt_bytes, stringify_query
+from pyugos._crypto import decrypt_bytes, encrypt_bytes, stringify_query
 
 
 class FakeResponse:
@@ -185,3 +185,51 @@ def test_url_auth_mode_encrypts_token_in_post_query():
         {"token": "raw-token"}
     )
     assert "X-Ugreen-Token" not in call["headers"]
+
+
+def test_private_get_keeps_video_params_visible_and_encrypts_only_auth_query():
+    api_private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    class DynamicSession:
+        def __init__(self):
+            self.calls = []
+            self.aes_key = None
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            self.aes_key = api_private.decrypt(
+                base64.b64decode(kwargs["headers"]["X-Ugreen-Security-Code"]),
+                padding.PKCS1v15(),
+            )
+            payload = {
+                "encrypt_resp_body": encrypt_bytes(
+                    self.aes_key,
+                    b'{"code":200,"data":{"ok":true}}',
+                )
+            }
+            return FakeResponse(payload)
+
+    session = DynamicSession()
+    client = UgreenNasClient("nas.local", session=session)  # type: ignore[arg-type]
+    client._token = "raw-token"
+    client._static_token = "raw-token"
+    client._auth_type = "header"
+    client._public_key = api_private.public_key()
+
+    result = client._get_private(
+        "/ugreen/v2/stream/transcode/web/play",
+        {
+            "m3u8_file": "video.mov_1920x1080.m3u8",
+            "prefer_h265": "false",
+            "task_id": "task-id",
+        },
+    )
+
+    assert result == {"ok": True}
+    params = session.calls[0][2]["params"]
+    assert params["m3u8_file"] == "video.mov_1920x1080.m3u8"
+    assert params["prefer_h265"] == "false"
+    assert params["task_id"] == "task-id"
+    assert session.aes_key is not None
+    assert decrypt_bytes(session.aes_key, params["encrypt_query"]) == b""
+    assert "token" not in params
