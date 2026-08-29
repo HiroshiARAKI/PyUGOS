@@ -1,5 +1,6 @@
 DRAFT.md
 *-notes.md
+.DS_Store
 .venv/
 __pycache__/
 *.egg-info/

@@ -1,5 +1,6 @@
 """Small data objects returned by the client."""
 
+import math
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -51,6 +52,38 @@ class UgreenBinary:
 
 
 @dataclass(frozen=True)
+class UgreenMediaInfo:
+    """Media metadata reported by UGOS for one file.
+
+    Fields that do not apply to the file, or that are absent on the running
+    firmware, are ``None``.  ``raw`` retains the complete response data so
+    callers can inspect firmware-specific additions without losing the typed
+    fields observed in the UGOS Web File Manager.
+    """
+
+    file_collation: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    duration: Optional[float] = None
+    bit_rate: Optional[str] = None
+    channel: Optional[str] = None
+    device: Optional[str] = None
+    software: Optional[str] = None
+    color_space: Optional[str] = None
+    resolution: Optional[str] = None
+    shoot_time: Optional[int] = None
+    frame_rate: Optional[float] = None
+    video_format: Optional[str] = None
+    hdr: Optional[bool] = None
+    iso: Optional[str] = None
+    aperture: Optional[str] = None
+    shutter_speed: Optional[str] = None
+    focal_length: Optional[str] = None
+    resolution_type: Optional[int] = None
+    raw: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
 class UgreenFile:
     """A file or directory reported by the UGOS File Manager search API."""
 
@@ -63,6 +96,15 @@ class UgreenFile:
     is_directory: bool
     raw: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
     _client: "UgreenNasClient" = field(repr=False, compare=False, default=None)  # type: ignore[assignment]
+
+    def get_media_info(self) -> UgreenMediaInfo:
+        """Get audio, video, or image metadata reported by UGOS."""
+
+        if self.is_directory:
+            raise ValueError("Directories do not have media information")
+        if self._client is None:
+            raise RuntimeError("This file is not attached to a client")
+        return self._client._get_media_info(self)
 
     def get_thumbnail(self, size: ThumbnailSize = ThumbnailSize.SMALL) -> UgreenBinary:
         """Get one of the three server-defined thumbnail renditions."""
@@ -205,6 +247,58 @@ def _boolean(value: Any) -> bool:
     if isinstance(value, str):
         return value.lower() in {"1", "true", "yes", "dir", "directory", "folder"}
     return bool(value)
+
+
+def _media_string(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) else None
+
+
+def _media_integer(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    return None
+
+
+def _media_number(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def media_info_from_record(record: Mapping[str, Any]) -> UgreenMediaInfo:
+    """Map the type-checked fields used by the UGOS Web File Manager."""
+
+    hdr = record.get("hdr")
+    return UgreenMediaInfo(
+        file_collation=_media_string(record.get("file_collation")),
+        width=_media_integer(record.get("width")),
+        height=_media_integer(record.get("height")),
+        duration=_media_number(record.get("duration")),
+        bit_rate=_media_string(record.get("bit_rate")),
+        channel=_media_string(record.get("channel")),
+        device=_media_string(record.get("device")),
+        software=_media_string(record.get("software")),
+        color_space=_media_string(record.get("color_space")),
+        resolution=_media_string(record.get("resolution")),
+        shoot_time=_media_integer(record.get("shoot_time")),
+        frame_rate=_media_number(record.get("frame_rate")),
+        video_format=_media_string(record.get("video_format")),
+        hdr=hdr if isinstance(hdr, bool) else None,
+        iso=_media_string(record.get("iso")),
+        aperture=_media_string(record.get("aperture")),
+        shutter_speed=_media_string(record.get("shutter_speed")),
+        focal_length=_media_string(record.get("focal_length")),
+        resolution_type=_media_integer(record.get("resolution_type")),
+        raw=dict(record),
+    )
 
 
 def file_from_record(

@@ -10,7 +10,7 @@ from .errors import (
     VideoPreparationTimeoutError,
     VideoQualityUnavailableError,
 )
-from .models import ThumbnailSize, UgreenBinary, UgreenFile
+from .models import ThumbnailSize, UgreenBinary, UgreenFile, UgreenMediaInfo
 from .streams import UgreenDownloadStream
 from .video import UgreenHlsManifest, UgreenHlsPlayback, VideoQuality, VideoVariant
 
@@ -24,6 +24,7 @@ __all__ = [
     "UgreenBinary",
     "UgreenDownloadStream",
     "UgreenFile",
+    "UgreenMediaInfo",
     "UgreenHlsManifest",
     "UgreenHlsPlayback",
     "UgreenNasClient",
@@ -33,4 +34,4 @@ __all__ = [
     "VideoVariant",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

@@ -42,6 +42,19 @@ for file in files:
 
 `get_thumbnail()` の `size` には `ThumbnailSize.SMALL`（`size_type=2`）、`MEDIUM`（`1`）、`LARGE`（`3`）を指定できます。実際のピクセル寸法は画像とUGOSのバージョンに依存します。戻り値は `UgreenBinary` で、`bytes(thumbnail)` で内容を取得でき、`thumbnail.content_type` でレスポンスの Content-Type を確認できます。`download()` は保存先を省略すると `bytes`、指定すると保存した `Path` を返します。
 
+### メディア情報
+
+画像、音声、動画についてUGOSの詳細パネルと同じメディア情報を取得できます。
+
+```python
+info = file.get_media_info()
+print(info.width, info.height)
+print(info.duration, info.frame_rate)
+print(info.video_format, info.hdr)
+```
+
+戻り値は `UgreenMediaInfo` です。取得できない項目は `None` になり、UGOSのファームウェア固有の追加項目を含む元データは `info.raw` で参照できます。既知項目として、解像度、duration、bit rate、channel、frame rate、映像形式、HDR、撮影機器・日時、software、color space、ISO、aperture、shutter speed、focal lengthを公開します。値の単位と表記はUGOSの応答を維持します。ディレクトリには使用できません。
+
 ### Range付きストリーミングダウンロード
 
 大きな動画などは `open_download()` で原本全体をメモリへ載せずに取得できます。HTTPレスポンスを確実に閉じるため、context managerとして使用してください。
@@ -112,6 +125,7 @@ with file.open_video(
 - header および url token mode
 - サーバー側 search task によるファイル検索
 - サムネイル取得
+- 画像・音声・動画のメディア情報取得
 - Range対応のストリーミングダウンロード
 - 1080p／720pのHLSブラウザ再生用ストリーム
 - 利用可能動画画質の取得
@@ -119,7 +133,7 @@ with file.open_video(
 
 NAS 上のファイル作成、更新、移動、削除を行うメソッドは実装していません。検索 task の作成には private API の仕様上 POST を使いますが、NAS のファイルシステムは変更しません。
 
-実機確認は DH2300 / UGOS Pro 1.18 系の header token mode で行っています。`downloadFile` の通常取得（200）、単一Range（206）、範囲外（416）も実機で確認済みです。1080p／720p HLSの通信仕様はDH2300 / UGOS Pro 1.18.2.0100のHARとWebプレイヤー実装に基づきます。url token mode は解析済みの通信仕様に基づく実装で、実機では未確認です。
+実機確認は DH2300 / UGOS Pro 1.18 系の header token mode で行っています。`downloadFile` の通常取得（200）、単一Range（206）、範囲外（416）も実機で確認済みです。1080p／720p HLSの通信仕様はDH2300 / UGOS Pro 1.18.2.0100のHARとWebプレイヤー実装に基づきます。メディア情報取得の通信仕様は同バージョンのHARとWeb UI実装に基づきます。url token mode は解析済みの通信仕様に基づく実装で、実機では未確認です。
 
 ## 開発
 
